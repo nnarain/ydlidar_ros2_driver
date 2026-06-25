@@ -35,7 +35,7 @@ def generate_launch_description():
             os.path.join(share_dir, 'launch', 'ydlidar_launch.py')
         ),
         launch_arguments={
-            'params_file': os.path.join(share_dir, 'params', 'X2.yaml'),
+            'params_file': os.path.join(share_dir, 'params', 'X2-safe.yaml'),
             'serial_port': serial_port,
             'frame_id': frame_id,
         }.items(),
