@@ -25,6 +25,7 @@
 #include "rclcpp/time_source.hpp"
 #include "sensor_msgs/msg/laser_scan.hpp"
 #include "std_srvs/srv/empty.hpp"
+#include "ydlidar_log_throttle.hpp"
 #include <vector>
 #include <iostream>
 #include <string>
@@ -35,6 +36,7 @@
 
 int main(int argc, char *argv[]) {
   rclcpp::init(argc, argv);
+  ydlidar_ros2_driver::StdoutWarningThrottler stdout_warning_throttler;
 
   auto node = rclcpp::Node::make_shared("ydlidar_ros2_driver_node");
 
