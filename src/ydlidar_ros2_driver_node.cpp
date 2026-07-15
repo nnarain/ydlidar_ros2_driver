@@ -23,12 +23,14 @@
 #include "rclcpp/clock.hpp"
 #include "rclcpp/rclcpp.hpp"
 #include "rclcpp/time_source.hpp"
+#include "diagnostic_updater/diagnostic_updater.hpp"
 #include "sensor_msgs/msg/laser_scan.hpp"
 #include "std_srvs/srv/empty.hpp"
 #include <vector>
 #include <iostream>
 #include <string>
 #include <signal.h>
+#include <limits>
 
 #define ROS2Verision "1.0.2-jazzy"
 
@@ -131,29 +133,36 @@ int main(int argc, char *argv[]) {
 
   bool invalid_range_is_inf = node->declare_parameter<bool>("invalid_range_is_inf", false);
 
-  // Initialize
-  bool ret = laser.initialize();
-  if (ret) 
-  {
-    // Set GS work mode (ignore for non-GS lidars)
-    int i_v = node->declare_parameter<int>("m1_mode", 0);
-    laser.setWorkMode(i_v, 0x01);
-    
-    i_v = node->declare_parameter<int>("m2_mode", 0);
-    laser.setWorkMode(i_v, 0x02);
-    
-    i_v = node->declare_parameter<int>("m3_mode", 1);
-    laser.setWorkMode(i_v, 0x04);
-    
-    // Start scanning
-    ret = laser.turnOn();
-  } 
-  else 
-  {
-    RCLCPP_ERROR(node->get_logger(), "%s\n", laser.DescribeError());
-  }
-  
+  // Set GS work mode (ignore for non-GS lidars)
+  const int i_m1 = node->declare_parameter<int>("m1_mode", 0);
+  const int i_m2 = node->declare_parameter<int>("m2_mode", 0);
+  const int i_m3 = node->declare_parameter<int>("m3_mode", 1);
+
+  // Create publisher for LaserScan messages
   auto laser_pub = node->create_publisher<sensor_msgs::msg::LaserScan>("scan", rclcpp::SensorDataQoS());
+
+  bool initialized = false;
+  std::string last_error = "Waiting for initialization";
+  rclcpp::Time last_successful_scan_time = node->now();
+
+  diagnostic_updater::Updater diagnostics(node);
+  diagnostics.setHardwareID("ydlidar");
+  diagnostics.add("YDLIDAR Device Status",
+    [&node, &initialized, &last_error, &last_successful_scan_time](diagnostic_updater::DiagnosticStatusWrapper &stat)
+    {
+      const double seconds_since_last_scan = (node->now() - last_successful_scan_time).seconds();
+      if (!initialized) {
+        stat.summary(diagnostic_msgs::msg::DiagnosticStatus::ERROR, "Lidar not initialized");
+      } else if (seconds_since_last_scan > 1.5) {
+        stat.summary(diagnostic_msgs::msg::DiagnosticStatus::WARN, "Lidar initialized but no recent scans");
+      } else {
+        stat.summary(diagnostic_msgs::msg::DiagnosticStatus::OK, "Lidar running");
+      }
+
+      stat.add("initialized", initialized ? "true" : "false");
+      stat.add("seconds_since_last_scan", seconds_since_last_scan);
+      stat.add("last_error", last_error);
+    });
 
   // Updated service callback signature for ROS2 Jazzy
   auto stop_scan_service =
@@ -176,8 +185,55 @@ int main(int argc, char *argv[]) {
 
   rclcpp::WallRate loop_rate(20);
 
-  while (ret && rclcpp::ok()) 
+  rclcpp::Time last_try_initialize_time = node->now();
+  rclcpp::Time last_diagnostics_publish_time = node->now();
+  const auto initialize_retry_interval = rclcpp::Duration::from_seconds(1.0);
+  const auto diagnostics_publish_interval = rclcpp::Duration::from_seconds(0.5);
+
+  while (rclcpp::ok()) 
   {
+    if (!initialized) 
+    {
+      if ((node->now() - last_try_initialize_time) >= initialize_retry_interval)
+      {
+        last_try_initialize_time = node->now();
+        bool ret = laser.initialize();
+        if (ret)
+        {
+          laser.setWorkMode(i_m1, 0x01);
+          laser.setWorkMode(i_m2, 0x02);
+          laser.setWorkMode(i_m3, 0x04);
+
+          // Start scanning
+          ret = laser.turnOn();
+          if (ret) 
+          {
+            RCLCPP_INFO(node->get_logger(), "[YDLIDAR INFO] Now YDLIDAR is working .......");
+            initialized = true;
+            last_error.clear();
+          } 
+          else 
+          {
+            last_error = laser.DescribeError();
+            RCLCPP_ERROR(node->get_logger(), "%s\n", last_error.c_str());
+          }
+        } 
+        else 
+        {
+          last_error = laser.DescribeError();
+          RCLCPP_ERROR(node->get_logger(), "%s\n", last_error.c_str());
+        }
+      }
+
+      if ((node->now() - last_diagnostics_publish_time) >= diagnostics_publish_interval) {
+        diagnostics.force_update();
+        last_diagnostics_publish_time = node->now();
+      }
+      rclcpp::spin_some(node);
+      loop_rate.sleep();
+      continue;
+    }
+
     LaserScan scan;
     if (laser.doProcessSimple(scan)) 
     {
@@ -197,6 +253,9 @@ int main(int argc, char *argv[]) {
       int size = (scan.config.max_angle - scan.config.min_angle)/ scan.config.angle_increment + 1;
       scan_msg->ranges.resize(size);
       scan_msg->intensities.resize(size);
+      if (invalid_range_is_inf) {
+        std::fill(scan_msg->ranges.begin(), scan_msg->ranges.end(), std::numeric_limits<float>::infinity());
+      }
       for (size_t i=0; i < scan.points.size(); i++) 
       {
         int index = std::ceil((scan.points[i].angle - scan.config.min_angle)/scan.config.angle_increment);
@@ -206,14 +265,25 @@ int main(int argc, char *argv[]) {
         }
       }
       laser_pub->publish(*scan_msg);
+      last_successful_scan_time = node->now();
+      last_error.clear();
     } 
     else 
     {
-      RCLCPP_ERROR(node->get_logger(), "Failed to get scan");
+      RCLCPP_WARN(node->get_logger(), "Failed to get scan, attempting to reinitialize lidar");
+      last_error = "Failed to get scan";
+      initialized = false;
+      last_try_initialize_time = node->now();
+      laser.turnOff();
+      laser.disconnecting();
     }
     if(!rclcpp::ok()) 
     {
       break;
+    }
+    if ((node->now() - last_diagnostics_publish_time) >= diagnostics_publish_interval) {
+      diagnostics.force_update();
+      last_diagnostics_publish_time = node->now();
     }
     rclcpp::spin_some(node);
     loop_rate.sleep();
