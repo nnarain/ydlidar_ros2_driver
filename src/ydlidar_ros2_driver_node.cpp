@@ -53,7 +53,8 @@ int main(int argc, char *argv[]) {
   str_optvalue = node->declare_parameter<std::string>("ignore_array", "");
   laser.setlidaropt(LidarPropIgnoreArray, str_optvalue.c_str(), str_optvalue.size());
 
-  std::string frame_id = node->declare_parameter<std::string>("frame_id", "laser_frame");
+  const std::string frame_id = node->declare_parameter<std::string>("frame_id", "laser_frame");
+  const std::string hardware_id = node->declare_parameter<std::string>("hardware_id", "ydlidar");
 
   //////////////////////int property/////////////////
   /// lidar baudrate
@@ -146,7 +147,7 @@ int main(int argc, char *argv[]) {
   rclcpp::Time last_successful_scan_time = node->now();
 
   diagnostic_updater::Updater diagnostics(node);
-  diagnostics.setHardwareID("ydlidar");
+  diagnostics.setHardwareID(hardware_id);
   diagnostics.add("YDLIDAR Device Status",
     [&node, &initialized, &last_error, &last_successful_scan_time](diagnostic_updater::DiagnosticStatusWrapper &stat)
     {
